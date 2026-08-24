@@ -1,0 +1,149 @@
+name: AndewAI RC8 Android Build (Fixed JVM)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Reconstruct RC8 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat rc8-source.zip.part* > rc8-source.zip
+          unzip -t rc8-source.zip
+          rm -rf rc8-source
+          mkdir -p rc8-source
+          unzip -q rc8-source.zip -d rc8-source
+
+      - name: Locate Android project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$(find rc8-source -type f -name settings.gradle.kts -print -quit || true)"
+          if [ -z "$ROOT" ]; then
+            ROOT="$(find rc8-source -type f -name settings.gradle -print -quit || true)"
+          fi
+          test -n "$ROOT" || { echo "ERROR: settings.gradle(.kts) not found."; exit 1; }
+          PROJECT_DIR="$(cd "$(dirname "$ROOT")" && pwd)"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "Android project: $PROJECT_DIR"
+          if [ -f "$PROJECT_DIR/gradlew" ]; then
+            echo "build_mode=wrapper" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_mode=system" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android tools
+        run: |
+          sdkmanager "platform-tools" \
+                     "platforms;android-35" \
+                     "build-tools;35.0.0" \
+                     "ndk;27.2.12479018" \
+                     "cmake;3.22.1"
+
+      - name: Normalize JVM target to 17
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("app/build.gradle.kts")
+          text = p.read_text(encoding="utf-8")
+
+          required = [
+              'sourceCompatibility = JavaVersion.VERSION_17',
+              'targetCompatibility = JavaVersion.VERSION_17',
+              'jvmTarget = "17"',
+          ]
+
+          if all(x in text for x in required):
+              print("JVM 17 configuration already present.")
+          else:
+              marker = '''    compileSdk = 35\n'''
+              block = '''    compileSdk = 35\n\n    compileOptions {\n        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17\n    }\n\n    kotlinOptions {\n        jvmTarget = "17"\n    }\n'''
+              if marker not in text:
+                  raise SystemExit("ERROR: expected compileSdk marker not found")
+              text = text.replace(marker, block, 1)
+              p.write_text(text, encoding="utf-8")
+              print("Applied JVM 17 configuration to app/build.gradle.kts")
+          PY
+
+          grep -n -A12 -B2 'compileOptions' app/build.gradle.kts
+          grep -n 'jvmTarget' app/build.gradle.kts
+
+      - name: Prepare Gradle
+        id: gradle
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.project.outputs.build_mode }}" = "wrapper" ]; then
+            chmod +x ./gradlew
+            echo "cmd=./gradlew" >> "$GITHUB_OUTPUT"
+            ./gradlew --version
+            exit 0
+          fi
+
+          VERSION="8.10.2"
+          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+            URL="$(grep -E '^distributionUrl=' gradle/wrapper/gradle-wrapper.properties | cut -d= -f2- || true)"
+            if [ -n "$URL" ]; then
+              DETECTED="$(printf '%s' "$URL" | sed -n 's/.*gradle-\([0-9][0-9.]*\)-.*/\1/p')"
+              [ -n "$DETECTED" ] && VERSION="$DETECTED"
+            fi
+          fi
+
+          cd "$RUNNER_TEMP"
+          curl -fsSL "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip" -o gradle.zip
+          unzip -q gradle.zip
+          echo "$RUNNER_TEMP/gradle-${VERSION}/bin" >> "$GITHUB_PATH"
+          cd "${{ steps.project.outputs.project_dir }}"
+          gradle --version
+          echo "cmd=gradle" >> "$GITHUB_OUTPUT"
+
+      - name: Build RC8 debug APK
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ${{ steps.gradle.outputs.cmd }} assembleDebug --stacktrace --no-daemon
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          find rc8-source -type f -name "*.apk" -exec cp {} artifacts/ \;
+          test -n "$(find artifacts -type f -name '*.apk' -print -quit)"
+          ls -lh artifacts
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AndewAI_Local_ZFold6_RC8_APK
+          path: artifacts/*.apk
+          if-no-files-found: error
+          retention-days: 14
