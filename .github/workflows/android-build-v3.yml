@@ -1,0 +1,134 @@
+name: AndewAI RC8 Android Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Reconstruct RC8 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat rc8-source.zip.part* > rc8-source.zip
+          unzip -t rc8-source.zip
+          rm -rf rc8-source
+          mkdir -p rc8-source
+          unzip -q rc8-source.zip -d rc8-source
+
+      - name: Locate Android project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="$(find rc8-source -type f -name settings.gradle.kts -print -quit || true)"
+          if [ -z "$ROOT" ]; then
+            ROOT="$(find rc8-source -type f -name settings.gradle -print -quit || true)"
+          fi
+
+          if [ -z "$ROOT" ]; then
+            echo "ERROR: settings.gradle(.kts) not found."
+            find rc8-source -maxdepth 4 -type f | sort | head -300
+            exit 1
+          fi
+
+          PROJECT_DIR="$(cd "$(dirname "$ROOT")" && pwd)"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "Android project: $PROJECT_DIR"
+
+          if [ -f "$PROJECT_DIR/gradlew" ]; then
+            echo "build_mode=wrapper" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_mode=system" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android tools
+        run: |
+          sdkmanager "platform-tools" \
+                     "platforms;android-35" \
+                     "build-tools;35.0.0" \
+                     "ndk;27.2.12479018" \
+                     "cmake;3.22.1"
+
+      - name: Prepare Gradle
+        id: gradle
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ steps.project.outputs.build_mode }}" = "wrapper" ]; then
+            chmod +x ./gradlew
+            echo "cmd=./gradlew" >> "$GITHUB_OUTPUT"
+            ./gradlew --version
+            exit 0
+          fi
+
+          VERSION=""
+
+          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+            URL="$(grep -E '^distributionUrl=' gradle/wrapper/gradle-wrapper.properties | cut -d= -f2- || true)"
+            if [ -n "$URL" ]; then
+              VERSION="$(printf '%s' "$URL" | sed -n 's/.*gradle-\([0-9][0-9.]*\)-.*/\1/p')"
+            fi
+          fi
+
+          if [ -z "$VERSION" ]; then
+            VERSION="8.10.2"
+            echo "No Gradle wrapper detected; using Gradle $VERSION."
+          else
+            echo "Using Gradle $VERSION from wrapper configuration."
+          fi
+
+          cd "$RUNNER_TEMP"
+          curl -fsSL "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip" -o gradle.zip
+          unzip -q gradle.zip
+          echo "$RUNNER_TEMP/gradle-${VERSION}/bin" >> "$GITHUB_PATH"
+
+          cd "${{ steps.project.outputs.project_dir }}"
+          gradle --version
+          echo "cmd=gradle" >> "$GITHUB_OUTPUT"
+
+      - name: Build RC8 debug APK
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ${{ steps.gradle.outputs.cmd }} assembleDebug --stacktrace --no-daemon
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          find rc8-source -type f -name "*.apk" -exec cp {} artifacts/ \;
+          test -n "$(find artifacts -type f -name '*.apk' -print -quit)"
+          ls -lh artifacts
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AndewAI_Local_ZFold6_RC8_APK
+          path: artifacts/*.apk
+          if-no-files-found: error
+          retention-days: 14
