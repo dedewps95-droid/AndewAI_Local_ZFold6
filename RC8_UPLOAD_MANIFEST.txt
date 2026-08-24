@@ -1,0 +1,5 @@
+AndewAI_Local_ZFold6 v1.0 RC8
+Upload all rc8-source.zip.partXX files to GitHub.
+They are consecutive raw byte parts of the original ZIP.
+Original size: 63369658 bytes
+Parts: 4
