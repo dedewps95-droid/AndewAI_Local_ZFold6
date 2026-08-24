@@ -11,53 +11,67 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Reconstruct BEFORE setup-java so Gradle cache detection can see the project.
+      - name: Reconstruct RC8 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat rc8-source.zip.part* > rc8-source.zip
+          unzip -t rc8-source.zip
+          rm -rf rc8-source
+          mkdir -p rc8-source
+          unzip -q rc8-source.zip -d rc8-source
+
+      - name: Locate Android project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+          GRADLEW="$(find rc8-source -type f -name gradlew -print -quit || true)"
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: gradlew was not found in reconstructed RC8 source."
+            echo "Top-level contents:"
+            find rc8-source -maxdepth 3 -type f | sort | head -200
+            exit 1
+          fi
+          PROJECT_DIR="$(cd "$(dirname "$GRADLEW")" && pwd)"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "Android project: $PROJECT_DIR"
+
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
           cache: gradle
+          cache-dependency-path: |
+            ${{ steps.project.outputs.project_dir }}/gradle/wrapper/gradle-wrapper.properties
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Install Android tools
         run: |
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
-
-      - name: Reconstruct RC8 source
-        run: |
-          set -e
-          cat rc8-source.zip.part* > rc8-source.zip
-          unzip -t rc8-source.zip
-          rm -rf rc8-source
-          mkdir rc8-source
-          unzip -q rc8-source.zip -d rc8-source
-
-      - name: Locate Android project
-        id: project
-        run: |
-          set -e
-          GRADLEW="$(find rc8-source -type f -name gradlew -print -quit)"
-          test -n "$GRADLEW"
-          PROJECT_DIR="$(cd "$(dirname "$GRADLEW")" && pwd)"
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Project: $PROJECT_DIR"
+          sdkmanager "platform-tools"                      "platforms;android-35"                      "build-tools;35.0.0"                      "ndk;27.2.12479018"                      "cmake;3.22.1"
 
       - name: Build RC8 debug APK
         working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
         run: |
+          set -euo pipefail
           chmod +x ./gradlew
           ./gradlew --version
           ./gradlew assembleDebug --stacktrace
 
       - name: Collect APK
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p artifacts
           find rc8-source -type f -name "*.apk" -exec cp {} artifacts/ \;
           test -n "$(find artifacts -type f -name '*.apk' -print -quit)"
