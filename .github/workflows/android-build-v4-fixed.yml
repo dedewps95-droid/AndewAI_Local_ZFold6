@@ -26,6 +26,18 @@ jobs:
           mkdir -p rc8-source
           unzip -q rc8-source.zip -d rc8-source
 
+      - name: Apply RC8 source fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT_ROOT="$(find rc8-source -type f -name settings.gradle.kts -print -quit | xargs -r dirname)"
+          test -n "$PROJECT_ROOT" || { echo "ERROR: Android project root not found."; exit 1; }
+          test -f MainActivity_FIXED.kt || { echo "ERROR: MainActivity_FIXED.kt missing from repository."; exit 1; }
+          install -m 0644 MainActivity_FIXED.kt "$PROJECT_ROOT/app/src/main/java/com/andew/ailocal/MainActivity.kt"
+          echo "Applied fixed MainActivity.kt"
+          grep -n "private fun RowScope.QuickCard" "$PROJECT_ROOT/app/src/main/java/com/andew/ailocal/MainActivity.kt"
+          grep -n "QuickCard(\"Chat AI\"" "$PROJECT_ROOT/app/src/main/java/com/andew/ailocal/MainActivity.kt"
+
       - name: Locate Android project
         id: project
         shell: bash
