@@ -31,27 +31,54 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           ROOT="$(find rc8-source -type f -name settings.gradle.kts -print -quit || true)"
-          if [ -z "$ROOT" ]; then
-            ROOT="$(find rc8-source -type f -name settings.gradle -print -quit || true)"
-          fi
-
-          if [ -z "$ROOT" ]; then
-            echo "ERROR: settings.gradle(.kts) not found."
-            find rc8-source -maxdepth 4 -type f | sort | head -300
-            exit 1
-          fi
-
+          if [ -z "$ROOT" ]; then ROOT="$(find rc8-source -type f -name settings.gradle -print -quit || true)"; fi
+          test -n "$ROOT" || { echo "ERROR: settings.gradle(.kts) not found."; exit 1; }
           PROJECT_DIR="$(cd "$(dirname "$ROOT")" && pwd)"
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Android project: $PROJECT_DIR"
+          if [ -f "$PROJECT_DIR/gradlew" ]; then echo "build_mode=wrapper" >> "$GITHUB_OUTPUT"; else echo "build_mode=system" >> "$GITHUB_OUTPUT"; fi
 
-          if [ -f "$PROJECT_DIR/gradlew" ]; then
-            echo "build_mode=wrapper" >> "$GITHUB_OUTPUT"
-          else
-            echo "build_mode=system" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Apply RC8 compile fixes
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          FIXED="$GITHUB_WORKSPACE/MainActivity_FIXED.kt"
+          test -f "$FIXED" || { echo "ERROR: MainActivity_FIXED.kt missing."; exit 1; }
+          install -m 0644 "$FIXED" app/src/main/java/com/andew/ailocal/MainActivity.kt
+
+          # Force Java/Kotlin to the same JVM target. This fixes the previous
+          # compileDebugJavaWithJavac=1.8 vs compileDebugKotlin=17 failure.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/build.gradle.kts')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('sourceCompatibility = JavaVersion.VERSION_1_8', 'sourceCompatibility = JavaVersion.VERSION_17')
+          s = s.replace('targetCompatibility = JavaVersion.VERSION_1_8', 'targetCompatibility = JavaVersion.VERSION_17')
+          s = s.replace('jvmTarget = "1.8"', 'jvmTarget = "17"')
+          if 'compileOptions {' not in s:
+              marker = '    compileSdk = 35\n'
+              if marker in s:
+                  s = s.replace(marker, marker + '\n    compileOptions {\n        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17\n    }\n\n    kotlinOptions {\n        jvmTarget = "17"\n    }\n', 1)
+          elif 'sourceCompatibility = JavaVersion.VERSION_17' not in s:
+              start = s.index('    compileOptions {')
+              end = s.index('    }', start) + len('    }')
+              block = '''    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }'''
+              s = s[:start] + block + s[end:]
+          if 'kotlinOptions {' in s and 'jvmTarget = "17"' not in s:
+              ks = s.index('    kotlinOptions {')
+              ke = s.index('    }', ks) + len('    }')
+              s = s[:ks] + '''    kotlinOptions {
+        jvmTarget = "17"
+    }''' + s[ke:]
+          p.write_text(s, encoding='utf-8')
+          PY
+
+          echo '--- JVM configuration ---'
+          grep -n -E 'compileOptions|sourceCompatibility|targetCompatibility|kotlinOptions|jvmTarget' app/build.gradle.kts || true
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -64,11 +91,7 @@ jobs:
 
       - name: Install Android tools
         run: |
-          sdkmanager "platform-tools" \
-                     "platforms;android-35" \
-                     "build-tools;35.0.0" \
-                     "ndk;27.2.12479018" \
-                     "cmake;3.22.1"
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
 
       - name: Prepare Gradle
         id: gradle
@@ -76,35 +99,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           if [ "${{ steps.project.outputs.build_mode }}" = "wrapper" ]; then
             chmod +x ./gradlew
             echo "cmd=./gradlew" >> "$GITHUB_OUTPUT"
             ./gradlew --version
             exit 0
           fi
-
-          VERSION=""
-
+          VERSION="8.10.2"
           if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
             URL="$(grep -E '^distributionUrl=' gradle/wrapper/gradle-wrapper.properties | cut -d= -f2- || true)"
-            if [ -n "$URL" ]; then
-              VERSION="$(printf '%s' "$URL" | sed -n 's/.*gradle-\([0-9][0-9.]*\)-.*/\1/p')"
-            fi
+            DETECTED="$(printf '%s' "$URL" | sed -n 's/.*gradle-\([0-9][0-9.]*\)-.*/\1/p')"
+            [ -n "$DETECTED" ] && VERSION="$DETECTED"
           fi
-
-          if [ -z "$VERSION" ]; then
-            VERSION="8.10.2"
-            echo "No Gradle wrapper detected; using Gradle $VERSION."
-          else
-            echo "Using Gradle $VERSION from wrapper configuration."
-          fi
-
           cd "$RUNNER_TEMP"
           curl -fsSL "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip" -o gradle.zip
           unzip -q gradle.zip
           echo "$RUNNER_TEMP/gradle-${VERSION}/bin" >> "$GITHUB_PATH"
-
           cd "${{ steps.project.outputs.project_dir }}"
           gradle --version
           echo "cmd=gradle" >> "$GITHUB_OUTPUT"
@@ -114,7 +124,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ${{ steps.gradle.outputs.cmd }} assembleDebug --stacktrace --no-daemon
+          ${{ steps.gradle.outputs.cmd }} clean assembleDebug --stacktrace --no-daemon
 
       - name: Collect APK
         shell: bash
